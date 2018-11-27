@@ -1,0 +1,20 @@
+---
+# defaults file for aws-openvpn
+openssl_cnf_version: 1.0.0
+openvpn_environmnent:
+  EASY_RSA: "/etc/openvpn/easy-rsa"
+  OPENSSL: "openssl"
+  PKCS11TOOL: "pkcs11-tool"
+  GREP: "grep"
+  KEY_CONFIG: "/etc/openvpn/easy-rsa/openssl.cnf"
+  KEY_DIR: "$EASY_RSA/keys"
+  PKCS11_MODULE_PATH: "dummy"
+  PKCS11_PIN: "dummy"
+  KEY_SIZE: 2048
+  KEY_DIR: "/etc/openvpn/easy-rsa/keys"
+  KEY_COUNTRY: "US"
+  KEY_PROVINCE: "CY"
+  KEY_CITY: "CY"
+  KEY_ORG: "NA"
+  KEY_EMAIL: "your@email"
+  KEY_OU: "NA"

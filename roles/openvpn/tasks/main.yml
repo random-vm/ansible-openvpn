@@ -1,0 +1,171 @@
+---
+- name: openvpn | Get nic
+  shell: bash -c "cat /proc/net/dev|tail -2|grep -v lo|cut -f 1 -d:| sed s'/^  //'g"
+  register: nic
+
+- name: openvpn | Install the packages
+  apt:
+    name:  "{{ item }}"
+    state: present
+  with_items:
+      - openvpn
+      - easy-rsa
+      - ufw
+
+- name: openvpn | enable openvpn
+  service:
+    name: openvpn
+    state: started
+    enabled: yes
+  register: ovenable
+
+- name: openvpn | template ufw rules
+  template:
+     src:  "{{ item.name }}.j2"
+     dest: "{{ item.path }}"
+  register: ufw
+  with_items:
+      - { name: 'before.rules', path: '/etc/ufw/before.rules' }
+      - { name: 'ufw', path: '/etc/default/ufw' }
+
+- name: openvpn | Set iptables
+  shell: |
+       ufw allow 443/udp
+       ufw allow OpenSSH
+       ufw disable
+       printf "y\n" |ufw enable
+  register: rulesdump
+  when: ufw.changed
+
+- name: openvpn | template sysctl rules
+  sysctl:
+     name: "{{ item }}"
+     value: 1
+     state: present
+     reload: yes
+     sysctl_file: /etc/sysctl.conf
+  register: sysctl
+  with_items:
+      - 'net.ipv6.conf.all.disable_ipv6'
+      - 'net.ipv6.conf.default.disable_ipv6'
+      - 'net.ipv6.conf.lo.disable_ipv6'
+      - "net.ipv6.conf.{{ nic.stdout }}.disable_ipv6"
+      - 'net.ipv4.ip_forward'
+  when: rulesdump.changed
+
+- name: openvpn | Drop IPv6 resolution in hosts
+  lineinfile:
+        dest: /etc/hosts
+        state: absent
+        regexp: '^::1     localhost ip6-localhost ip6-loopback$'
+
+- name: openvpn | Copy server config
+  template:
+      src: base.j2
+      dest: /etc/openvpn/base
+
+- name: openvpn | copy configs
+  copy:
+     src: "{{ item.name }}"
+     dest: "{{ item.path }}"
+  with_items:
+      - { name: 'server.conf', path: '/etc/openvpn/server.conf' }
+      - { name: 'make_configs.sh', path: '/etc/openvpn/make_configs.sh' }
+      - { name: 'environment', path: '/etc/environment' }
+
+- name: openvpn | set executable on make_configs.sh
+  file:
+    path: /etc/openvpn/make_configs.sh
+    mode: "a+x"
+
+- name: openvpn | create ca directory
+  command: make-cadir /etc/openvpn/easy-rsa
+  args:
+    creates: /etc/openvpn/easy-rsa
+
+- name: openvpn | link desired openssl version
+  file:
+    src: "/etc/openvpn/easy-rsa/openssl-{{ openssl_cnf_version }}.cnf"
+    dest: /etc/openvpn/easy-rsa/openssl.cnf
+    state: link
+
+- name: openvpn | create keys directory
+  file:
+    path: /etc/openvpn/easy-rsa/keys
+    state: directory
+    mode: 0700
+  register: key_dir
+
+- name: openvpn | make sure index and serial file are present
+  copy:
+    src: "{{ item }}"
+    dest: "/etc/openvpn/easy-rsa/keys/{{ item }}"
+    force: no
+  register: file_stat
+  with_items:
+      - index.txt
+      - serial
+
+- name: openvpn | set serial
+  lineinfile:
+    path: /etc/openvpn/easy-rsa/keys/serial
+    line: '01'
+  when: file_stat.changed
+
+- name: openvpn | create access key directory
+  file:
+    path: /etc/openvpn/easy-rsa/clients
+    state: directory
+
+- name: openvpn | intialize openvpn CA
+  environment: "{{ openvpn_environmnent }}"
+  shell: |
+     openssl dhparam -out /etc/openvpn/dh2048.pem 2048
+     openvpn --genkey --secret /etc/openvpn/easy-rsa/keys/ta.key
+     /usr/share/easy-rsa/pkitool --initca
+     /usr/share/easy-rsa/pkitool --server server
+  register: gencert
+  args:
+    creates: /etc/openvpn/dh2048.pem
+
+- name: openvpn | add openvpn secure user
+  user:
+    name: openvpn_server
+    system: yes
+    createhome: no
+    shell: /usr/sbin/nologin
+
+- name: openvpn | generate revocation crl.pem
+  environment: "{{ openvpn_environmnent }}"
+  shell: |
+    /usr/share/easy-rsa/pkitool crl-dummy-cert
+    /etc/openvpn/make_configs.sh crl-dummy-cert
+    /usr/share/easy-rsa/revoke-full crl-dummy-cert
+    chmod 777 /etc/openvpn/easy-rsa/keys/crl.pem
+  ignore_errors: True
+  register: revoke
+  notify: restart-openvpn
+  when: gencert.changed
+
+- name: openvpn | generate user keys
+  environment: "{{ openvpn_environmnent }}"
+  shell: |
+      /usr/share/easy-rsa/pkitool shared_key
+      /etc/openvpn/make_configs.sh shared_key
+  args:
+     chdir: /etc/openvpn/easy-rsa/keys
+     creates: /etc/openvpn/easy-rsa/clients/shared_key.ovpn
+  notify: restart-openvpn
+  register: add_client
+
+- name: openvpn | link crl file
+  copy:
+    remote_src: True
+    src: /etc/openvpn/easy-rsa/keys/crl.pem
+    dest: /etc/openvpn/crl.pem
+  when: add_client.changed or revoke.changed
+
+###service module not enabled openvpn service??
+- name: openvpn | enable service
+  command: systemctl enable openvpn
+  when: ovenable.changed or revoke.changed
